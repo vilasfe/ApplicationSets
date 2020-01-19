@@ -5,6 +5,14 @@
       join_command_location: "./join_command.out"
 
   tasks:
+    - name: Update cache to make sure everything is fresh
+      apt:
+        update_cache: yes
+    - name: Installing curl
+      apt:
+        state: latest
+        name: curl
+
     - name: Check to see if Docker is already installed
       shell: dpkg-query -W 'docker-ce'
       ignore_errors: True
@@ -13,30 +21,43 @@
     # Docker install. Skip if already installed
     - block:
         - name: Make sure certificates are installed and updated
-          apt: name={{ item }} state=present
-          with_items:
-            - apt-transport-https
-            - ca-certificates
-            - software-properties-common
+          apt:
+            state: latest
+            name:
+              - apt-transport-https
+              - ca-certificates
+              - software-properties-common
+              - apt-utils
+              - rsync
 
         - name: Install Docker repository key
-          shell: "curl -fsSL https://download.docker.com/linux/raspbian/gpg | apt-key add -"
+          shell: "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -"
 
         - name: Add Docker source for apt
           lineinfile:
             dest: /etc/apt/sources.list.d/docker.list
-            line: "deb [arch=armhf] https://download.docker.com/linux/raspbian stretch stable"
+            line: "deb [arch=arm64] https://download.docker.com/linux/ubuntu bionic stable"
             create: yes
 
         - name: Update cache to get Docker
           apt:
             update_cache: yes
 
+        - name: Uninstall old Docker
+          apt:
+            state: absent
+            purge: yes
+            name:
+              - docker
+              - docker-engine
+              - docker.io
+
         - name: Install Docker
-          apt: name={{ item }} state=present
-          with_items:
-            - docker-ce=18.06.3~ce~3-0~ubuntu
-            - containerd.io
+          apt:
+            state: latest
+            name:
+              - docker-ce
+              - containerd.io
 
         - name: Append picocluster to docker Group
           user:
@@ -46,6 +67,31 @@
           register: group
       when: is_docker is failed
 
+    - name: Enable docker service
+      service:
+        name: docker
+        state: started
+        enabled: yes
+        
+    - name: Make docker use systemd for cgroup management
+      copy:
+        content: |
+          {
+            "exec-opts": ["native.cgroupdriver=systemd"],
+            "log-driver": "json-file",
+            "log-opts": {
+              "max-size": "100m"
+            },
+            "storage-driver": "overlay2"
+          }
+        dest: /etc/docker/daemon.json
+  
+    - name: Restart systemd to see new config file
+      shell: systemctl daemon-reload
+  
+    - name: Restart docker with new config file
+      shell: systemctl restart docker
+  
     - name: Check to see if Kubernetes is already installed
       shell: dpkg-query -W 'kubeadm'
       ignore_errors: True
@@ -67,48 +113,72 @@
             update_cache: yes
 
         - name: Install Kubernetes
-          apt: name={{ item }} state=present
-          with_items:
-            - kubeadm=1.11.0-00
-            - kubectl=1.11.3-00
-            - kubelet=1.11.3-00
-            - kubernetes-cni=0.6.0-00
+          apt:
+            state: latest
+            name:
+              - kubeadm
+              - kubectl
+              - kubelet
+              - kubernetes-cni
+
           register: kubernetes_install
 
         # Execute the post install requirements
-        - block:
-            # [POST INSTALL ITEMS]
-            - name: turn off the swap file
-              apt: name={{ item }} state=absent purge=yes
-              with_items:
-                - zram-config
-              register: swapfile
+        # Edit FEV: Run with zram swap, since nVidia boards like it
+        #- block:
+        #    # [POST INSTALL ITEMS]
+        #    - name: turn off the swap file
+        #      apt:
+        #        state: absent
+        #        purge: yes
+        #        name:
+        #          - zram-config
+        #      register: swapfile
+        #      
+        #    - name: run swapoff
+        #      become: yes
+        #      shell:
+        #        cmd: swapoff -a
 
-            - name: Wait 10 seconds for disk writes to stabilize
-              wait_for: 
-                timeout: 10
+        #    - name: Wait 10 seconds for disk writes to stabilize
+        #      wait_for: 
+        #        timeout: 10
 
-            - name: Reboot machine if swapfile status changed
-              shell: "reboot"
-              when: swapfile.changed
+        #    - name: Reboot machine if swapfile status changed
+        #      shell: "reboot"
+        #      when: swapfile.changed
 
+        # Since we have swap, convince kubelet that all is well
+        - name: Tell kubelet to ignore swap
+          lineinfile:
+            path: /etc/default/kubelet
+            line: KUBELET_EXTRA_ARGS=--fail-swap-on=false
+            create: yes         
+            
+        - name: Restart kubelet
+          service:
+            name: kubelet
+            daemon_reload: yes
+            state: restarted
+          
       when: is_kubernetes is failed
 
     - block:
         # Create Kubernetes cluster and save join command to file
         - block:
             - name: Init kubernetes
-              command: "kubeadm init --pod-network-cidr 10.244.0.0/16"
+              command: "kubeadm init --ignore-preflight-errors Swap --pod-network-cidr 10.244.0.0/16"
               register: kube_init
 
             - name: Extract join command
-              command: "kubeadm token create --print-join-command"
+              shell: kubeadm token create --print-join-command
               register: join_command
-
+              
             - name: Save join command
-              local_action: copy content={{ join_command.stdout_lines | last  | trim }} dest="{{ join_command_location }}"
+              become: no
+              local_action: copy content="{{ join_command.stdout_lines | last  | trim }} --ignore-preflight-errors Swap" dest="{{ join_command_location }}"
 
-            - name: Copy join command to worker nodes 
+            - name: Copy join command to worker nodes
               synchronize:
                 src: "{{ join_command_location }}"
                 dest: "{{ join_command_location }}"
@@ -129,29 +199,12 @@
 
             - shell: "sudo chown $(id -u):$(id -g) $HOME/.kube/config"
 
-            - name: Set up flannel networking
-              shell: "curl -sSL https://rawgit.com/coreos/flannel/v0.11.0/Documentation/kube-flannel.yml | sed 's/amd64/arm64/g' | kubectl create -f -"
+            - name: Pass IPv4 traffic iptables' chain
+              become: yes
+              shell: "sysctl net.bridge.bridge-nf-call-iptables=1"
 
-            - name: Check to see if flannel network is defined
-              stat:
-                path: /etc/netplan/eth0.yaml
-              register: stat_result
- 
-            - name: Create the flannel network if missing
-              blockinfile:
-                dest: /etc/netplan/eth0.yaml
-                regexp: '^     dhcp4: true'
-                block: |
-                       {
-                         "name": "cbr0",
-                         "type": "flannel", 
-                         "delegate": {
-                           "isDefaultGateway": true
-                         }
-                       }
-                become: yes
-                create: yes
-              when: stat_result.stat.exists is False
+            - name: Set up flannel networking
+              shell: "kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml"
           become: no
           when: "'master' in group_names"
 
@@ -167,14 +220,14 @@
               command: "{{ join_command_local.msg }}"
               when: "'worker' in group_names"
           when: (kube_init is success) and (join_command is defined)
-      
+
       when: (is_kubernetes is success) or (kubernetes_install is success)
 
 
     # Wait a few seconds, then print the output of the Kubernetes cluster status. All nodes should have joined.
     - block:
         - name: Wait 60 seconds for Kubernetes to stabilize
-          wait_for: 
+          wait_for:
             timeout: 10
 
         - name: Retrieve the  cluster status and show it
