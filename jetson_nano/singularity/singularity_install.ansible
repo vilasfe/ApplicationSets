@@ -1,0 +1,61 @@
+---
+- hosts: cluster
+  remote_user: picocluster
+  tasks:
+  - name: Add golang-backports repo
+    become: true
+    apt_repository:
+      repo: ppa:longsleep/golang-backports
+  - name: Install singularity dependencies
+    become: true
+    apt:
+      update_cache: true
+      state: latest
+      name:
+        - build-essential
+        - libssl-dev
+        - uuid-dev
+        - libgpgme-dev
+        - squashfs-tools
+        - libseccomp-dev
+        - wget
+        - pkg-config
+        - git
+        - cryptsetup-bin
+        - golang-go
+        - inotify-tools
+        - socat
+
+  - name: Install singularity
+    become: true
+    apt:
+      update_cache: true
+      state: latest
+      name:
+        - singularity-container
+
+  - name: Download singularity CRI source
+    become: false
+    git:
+      repo: 'https://github.com/sylabs/singularity-cri.git'
+      dest: /home/picocluster/singularity-cri
+      version: v1.0.0-beta.7
+
+  - name: Build singularity CRI source
+    become: false
+    make:
+      chdir: /home/picocluster/singularity-cri
+
+  - name: Uninstall any old singularity CRI
+    become: true
+    make:
+      chdir: /home/picocluster/singularity-cri
+      target: uninstall
+
+  - name: Install new singularity CRI
+    become: true
+    make:
+      chdir: /home/picocluster/singularity-cri
+      target: install
+
+
