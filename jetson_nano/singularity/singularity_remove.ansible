@@ -1,0 +1,68 @@
+---
+- hosts: cluster
+  remote_user: picocluster
+  tasks:
+  - name: Remove old versions of singularity using apt
+    become: true
+    apt:
+      state: absent
+      name: singularity-container
+      
+  - name: Remove old versions of singularity from source builds
+    become: true
+    file:
+      state: absent
+      name:
+        - /usr/local/libexec/singularity
+        - /usr/local/var/singularity
+        - /usr/local/etc/singularity
+        - /usr/local/bin/singularity
+        - /usr/local/bin/run-singularity
+        - /usr/local/etc/bash_completion.d/singularity
+    
+  - name: Remove old singularity CRI source directory
+    become: false
+    file:
+      name: /home/picocluster/singularity-cri
+      state: absent
+  
+  - name: Download singularity CRI source
+    become: false
+    git:
+      repo: 'https://github.com/sylabs/singularity-cri.git'
+      dest: /home/picocluster/singularity-cri
+      version: v1.0.0-beta.7
+      
+  - name: Build singularity CRI source
+    become: false
+    make:
+      chdir: /home/picocluster/singularity-cri
+
+  - name: Uninstall any old singularity CRI
+    become: true
+    make:
+      chdir: /home/picocluster/singularity-cri
+      target: uninstall
+
+  - name: Remove old singularity CRI source directory
+    become: false
+    file:
+      name: /home/picocluster/singularity-cri
+      state: absent
+
+  - name: Remove old singularity source directory
+    become: false
+    file:
+      name: /home/picocluster/singularity
+      state: absent
+      
+  - name: Remove sycri service file
+    become: true
+    file:
+      name: /etc/systemd/system/sycri.service
+      state: absent
+      
+  - name: Remove unneeded packages
+    become: true
+    shell: apt-get autoremove -y
+

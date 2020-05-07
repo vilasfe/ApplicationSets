@@ -1,0 +1,48 @@
+---
+- hosts: cluster
+  remote_user: picocluster
+  tasks:
+  - name: Create Singularity-CRI service
+    become: true
+    copy:
+      content: |
+        [Unit]
+        Description=Singularity-CRI
+        After=network.target
+        StartLimitIntervalSec=0
+
+        [Service]
+        Type=simple
+        Restart=always
+        RestartSec=1
+        ExecStart=/usr/local/bin/sycri
+        Environment="PATH=/usr/local/libexec/singularity/bin:/bin:/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+
+        [Install]
+        WantedBy=multi-user.target
+      
+      dest: /etc/systemd/system/sycri.service
+      
+  - name: Start Singularity-CRI service
+    become: true
+    service:
+      name: sycri
+      daemon_reload: yes
+      state: started
+      enabled: yes
+      
+  - name: Modify kubelet config
+    become: true
+    replace:
+      dest: /etc/default/kubelet
+      regexp: '^(KUBELET_EXTRA_ARGS=.*)$'
+      replace: '\1 --container-runtime=remote --container-runtime-endpoint=unix:///var/run/singularity.sock --image-service-endpoint=unix:///var/run/singularity.sock'
+
+    
+  - name: Restart kubelet
+    become: true
+    service:
+      name: kubelet
+      daemon_reload: yes
+      state: restarted
+      
