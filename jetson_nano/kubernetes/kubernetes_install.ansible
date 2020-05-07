@@ -30,18 +30,18 @@
               - apt-utils
               - rsync
 
-        - name: Install Docker repository key
-          shell: "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -"
+        #- name: Install Docker repository key
+        #  shell: "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -"
 
-        - name: Add Docker source for apt
-          lineinfile:
-            dest: /etc/apt/sources.list.d/docker.list
-            line: "deb [arch=arm64] https://download.docker.com/linux/ubuntu bionic stable"
-            create: yes
+        #- name: Add Docker source for apt
+        #  lineinfile:
+        #    dest: /etc/apt/sources.list.d/docker.list
+        #    line: "deb [arch=arm64] https://download.docker.com/linux/ubuntu bionic stable"
+        #    create: yes
 
-        - name: Update cache to get Docker
-          apt:
-            update_cache: yes
+        #- name: Update cache to get Docker
+        #  apt:
+        #    update_cache: yes
 
         - name: Uninstall old Docker
           apt:
@@ -52,12 +52,11 @@
               - docker-engine
               - docker.io
 
-        - name: Install Docker
+        - name: Install NVidia Docker
           apt:
             state: latest
             name:
-              - docker-ce
-              - containerd.io
+              - nvidia-jetpack
 
         - name: Append picocluster to docker Group
           user:
@@ -72,7 +71,7 @@
         name: docker
         state: started
         enabled: yes
-        
+
     - name: Make docker use systemd for cgroup management
       copy:
         content: |
@@ -82,7 +81,14 @@
             "log-opts": {
               "max-size": "100m"
             },
-            "storage-driver": "overlay2"
+            "storage-driver": "overlay2",
+            "default-runtime": "nvidia",
+            "runtimes": {
+              "nvidia": {
+                "path": "nvidia-container-runtime",
+                "runtimeArgs": []
+              }
+            }
           }
         dest: /etc/docker/daemon.json
   
@@ -153,14 +159,14 @@
           lineinfile:
             path: /etc/default/kubelet
             line: KUBELET_EXTRA_ARGS=--fail-swap-on=false
-            create: yes         
-            
+            create: yes
+
         - name: Restart kubelet
           service:
             name: kubelet
             daemon_reload: yes
             state: restarted
-          
+
       when: is_kubernetes is failed
 
     - block:
@@ -173,7 +179,7 @@
             - name: Extract join command
               shell: kubeadm token create --print-join-command
               register: join_command
-              
+
             - name: Save join command
               become: no
               local_action: copy content="{{ join_command.stdout_lines | last  | trim }} --ignore-preflight-errors Swap" dest="{{ join_command_location }}"
@@ -238,3 +244,57 @@
         - debug: var=kubernetes_status.stdout_lines
       when: "'master' in group_names"
 
+    # Collect the info for gitlab integration
+    - block:
+        - name: Create gitlab admin service account
+          become: no
+          shell:
+            cmd: kubectl apply -f gitlab-admin-service-account.yaml
+
+        - name: Get k8s API URL
+          become: no
+          shell: kubectl cluster-info | grep 'Kubernetes master' | awk '/http/ {print $NF}'
+          register: kubernetes_url
+
+        - name: Get k8s CA cert
+          shell: kubectl get secret $(kubectl get secrets | grep 'default-token' | cut -d ' ' -f 1) -o jsonpath="{['data']['ca\.crt']}" | base64 --decode
+          register: kubernetes_ca_cert
+          become: no
+
+        - name: Get k8s gitlab-admin token
+          shell: kubectl -n kube-system describe secret $(kubectl -n kube-system get secret | grep gitlab-admin | awk '{print $1}')
+          register: kubernetes_admin_token
+          become: no
+
+        - debug: var=kubernetes_url.stdout_lines
+        - debug: var=kubernetes_ca_cert.stdout_lines
+        - debug: var=kubernetes_admin_token.stdout_lines
+
+      when: "'master' in group_names"
+
+    # Install helm manually since gitlab has a bug for arm64 clusters for now
+    - block:
+        - name: Download install-helm.sh autoinstaller for Helm 2.x
+          become: no
+          get_url:
+            # switch from 2.x to 3.x
+            #url: https://raw.githubusercontent.com/kubernetes/helm/master/scripts/get
+            #dest: /home/picocluster/install-helm.sh
+            url: https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3
+            dest: /home/picocluster/get_helm.sh
+            mode: '0700'
+
+        - name: Run install-helm.sh
+          become: no
+          shell:
+            chdir: /home/picocluster
+            # switch from 2.x to 3.x
+            #cmd: ./install-helm.sh
+            cmd: ./get_helm.sh
+
+        # helm init not needed in 3.x
+        #- name: Install helm tiller
+        #  become: no
+        #  cmd: helm init
+
+      when: "'master' in group_names"

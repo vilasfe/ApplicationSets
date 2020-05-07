@@ -25,4 +25,18 @@
           - kubectl
           - kubelet
           - kubernetes-cni
+          
+    - name: Remove kubelet config file
+      file:
+        name: /etc/default/kubelet
+        state: absent
+        
+    - name: Take down cni0 bridge
+      shell:
+        cmd: "ip link set cni0 down ; brctl delbr cni0"
+      
+    - name: Remove helm
+      file:
+        name: /usr/local/bin/helm
+        state: absent
 
