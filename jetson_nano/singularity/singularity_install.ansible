@@ -6,6 +6,7 @@
     become: true
     apt_repository:
       repo: ppa:longsleep/golang-backports
+
   - name: Install singularity dependencies
     become: true
     apt:
@@ -26,21 +27,62 @@
         - inotify-tools
         - socat
 
-  - name: Install singularity
+  - name: Remove old versions of singularity using apt
     become: true
     apt:
-      update_cache: true
-      state: latest
+      state: absent
+      name: singularity-container
+      
+  - name: Remove old versions of singularity from source builds
+    become: true
+    file:
+      state: absent
       name:
-        - singularity-container
+        - /usr/local/libexec/singularity
+        - /usr/local/var/singularity
+        - /usr/local/etc/singularity
+        - /usr/local/bin/singularity
+        - /usr/local/bin/run-singularity
+        - /usr/local/etc/bash_completion.d/singularity
+    
+  - name: Download singularity source
+    become: false
+    git:
+      repo: 'https://github.com/sylabs/singularity.git'
+      dest: /home/picocluster/singularity
+      version: v3.5.2
 
+  - name: Configure singularity source
+    become: false
+    shell:
+      cmd: ./mconfig
+      chdir: /home/picocluster/singularity
+      
+  - name: Build singularity source
+    become: false
+    shell:
+      cmd: make -C ./builddir
+      chdir: /home/picocluster/singularity
+
+  - name: Install new singularity
+    become: true
+    shell:
+      cmd: make -C ./builddir install
+      chdir: /home/picocluster/singularity
+  
+  - name: Remove old singularity CRI source directory
+    become: false
+    file:
+      name: /home/picocluster/singularity-cri
+      state: absent
+  
   - name: Download singularity CRI source
     become: false
     git:
       repo: 'https://github.com/sylabs/singularity-cri.git'
       dest: /home/picocluster/singularity-cri
       version: v1.0.0-beta.7
-
+      
   - name: Build singularity CRI source
     become: false
     make:
