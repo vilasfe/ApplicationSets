@@ -35,10 +35,10 @@
         block: |
                 auto eth0
                 iface eth0 inet static
-                address 10.1.10.240
+                address 192.168.11.240
                 netmask 255.255.255.0
-                gateway 10.1.10.1
-                dns-nameservers 10.1.10.1 8.8.8.8
+                gateway 192.168.11.1
+                dns-nameservers 192.168.11.1 8.8.8.8
 
     - name: Add host mappings to /etc/hosts
       blockinfile:
@@ -47,11 +47,11 @@
           {{ item.ip }} {{ item.name }}
         marker: "# {mark} ANSIBLE MANAGED BLOCK {{ item.name }}"
       with_items:
-      - { name: pc0, ip: 10.1.10.240 }
-      - { name: pc1, ip: 10.1.10.241 }
-      - { name: pc2, ip: 10.1.10.242 }
-      - { name: pc3, ip: 10.1.10.243 }
-      - { name: pc4, ip: 10.1.10.244 }
+      - { name: pc0, ip: 192.168.11.240 }
+      - { name: pc1, ip: 192.168.11.241 }
+      - { name: pc2, ip: 192.168.11.242 }
+      - { name: pc3, ip: 192.168.11.243 }
+      - { name: pc4, ip: 192.168.11.244 }
 
     - name: Add our ansible hosts setup
       blockinfile:
