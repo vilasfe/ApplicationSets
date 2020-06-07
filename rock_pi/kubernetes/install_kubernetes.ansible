@@ -5,58 +5,80 @@
       join_command_location: "./join_command.out"
 
   tasks:
+    - name: Set iptables to legacy
+      shell: "update-alternatives --set iptables /usr/sbin/iptables-legacy"
+
+    - name: Set iptables6 to legacy
+      shell: "update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy"
+
     - name: Update cache to make sure everything is fresh
       apt:
         update_cache: yes
-    - name: Installing curl
+
+    - name: turn off the swap file
+      systemd:
+        name: dphys-swapfile
+        enabled: no
+        masked: yes
+
+    - name: Remove swapfile package
       apt:
-        state: latest
-        name: curl
+        name: ['dphys-swapfile']
+        state: absent
+      register: swap
+
+    # Reboot nodes for swap changes to take effect
+    - block:
+        - name: Reboot the worker nodes if swap was removed.
+          shell: "reboot"
+          ignore_errors: True
+          when: "'worker' in group_names"
+
+        - name: Reboot the master node if swap was removed.
+          shell: "reboot"
+          ignore_errors: True
+          when: "'master' in group_names"
+      when: swap.changed
 
     - name: Check to see if Docker is already installed
-      shell: dpkg-query -W 'docker-ce'
+      shell: dpkg-query -W 'docker'
       ignore_errors: True
       register: is_docker
 
     # Docker install. Skip if already installed
     - block:
-        - name: Make sure certificates are installed and updated
+        - name: install latest docker.io
           apt:
-            state: latest
-            name:
-              - apt-transport-https
-              - ca-certificates
-              - software-properties-common
-              - apt-utils
-              - rsync
+            name: ['docker.io']
+            state: present
 
-        #- name: Install Docker repository key
-        #  shell: "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -"
+        - name: Create docker daemon file
+          blockinfile:
+            dest: /etc/docker/daemon.json
+            block: |
+                   {
+                     "exec-opts": ["native.cgroupdriver=systemd"],
+                     "log-driver": "json-file",
+                     "log-opts": {
+                       "max-size": "100m"
+                     },
+                     "storage-driver": "overlay2"
+                   }
+            create: yes
+            marker: ""
+          ignore_errors: True
 
-        #- name: Add Docker source for apt
-        #  lineinfile:
-        #    dest: /etc/apt/sources.list.d/docker.list
-        #    line: "deb [arch=arm64] https://download.docker.com/linux/ubuntu bionic stable"
-        #    create: yes
+        - name: Make docker.service.d directory
+          shell: "mkdir -p /etc/systemd/system/docker.service.d"
 
-        #- name: Update cache to get Docker
-        #  apt:
-        #    update_cache: yes
+        - name: restart docker
+          systemd:
+            state: restarted
+            daemon_reload: yes
+            name: docker
 
-        - name: Uninstall old Docker
-          apt:
-            state: absent
-            purge: yes
-            name:
-              - docker
-              - docker-engine
-              - docker.io
-
-        - name: Install NVidia Docker
-          apt:
-            state: latest
-            name:
-              - nvidia-jetpack
+        - name: hold docker.io so it's not upgraded
+          shell: "apt-mark hold docker.io"
 
         - name: Append picocluster to docker Group
           user:
@@ -120,53 +142,14 @@
 
         - name: Install Kubernetes
           apt:
-            state: latest
-            name:
-              - kubeadm
-              - kubectl
-              - kubelet
-              - kubernetes-cni
+            name: ['kubeadm=1.15.5-00', 'kubectl=1.15.5-00', 'kubelet=1.15.5-00', 'kubernetes-cni=0.7.5-00']
+            state: present
 
+        - name: hold kubelet kubeadm kubectl so they are not upgraded
+          shell: "apt-mark hold kubelet kubeadm kubectl"
           register: kubernetes_install
 
-        # Execute the post install requirements
-        # Edit FEV: Run with zram swap, since nVidia boards like it
-        #- block:
-        #    # [POST INSTALL ITEMS]
-        #    - name: turn off the swap file
-        #      apt:
-        #        state: absent
-        #        purge: yes
-        #        name:
-        #          - zram-config
-        #      register: swapfile
-        #      
-        #    - name: run swapoff
-        #      become: yes
-        #      shell:
-        #        cmd: swapoff -a
-
-        #    - name: Wait 10 seconds for disk writes to stabilize
-        #      wait_for: 
-        #        timeout: 10
-
-        #    - name: Reboot machine if swapfile status changed
-        #      shell: "reboot"
-        #      when: swapfile.changed
-
-        # Since we have swap, convince kubelet that all is well
-        - name: Tell kubelet to ignore swap
-          lineinfile:
-            path: /etc/default/kubelet
-            line: KUBELET_EXTRA_ARGS=--fail-swap-on=false
-            create: yes
-
-        - name: Restart kubelet
-          service:
-            name: kubelet
-            daemon_reload: yes
-            state: restarted
-
+      
       when: is_kubernetes is failed
 
     - block:
@@ -190,7 +173,6 @@
                 dest: "{{ join_command_location }}"
           when: "'master' in group_names"
 
-
         # Some additional setup for the control user on master
         - block:
             - name: Remove .kube directory if it exists
@@ -210,10 +192,11 @@
               shell: "sysctl net.bridge.bridge-nf-call-iptables=1"
 
             - name: Set up flannel networking
-              shell: "kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml"
+              shell: "curl -sSL https://rawgit.com/coreos/flannel/v0.11.0/Documentation/kube-flannel.yml | kubectl create -f -"
+              ignore_errors: True
+
           become: no
           when: "'master' in group_names"
-
 
         # Read the join command on the workers and join the cluster
         - block:
@@ -233,8 +216,8 @@
     # Wait a few seconds, then print the output of the Kubernetes cluster status. All nodes should have joined.
     - block:
         - name: Wait 60 seconds for Kubernetes to stabilize
-          wait_for:
-            timeout: 10
+          wait_for: 
+            timeout: 60
 
         - name: Retrieve the  cluster status and show it
           shell: kubectl get nodes
